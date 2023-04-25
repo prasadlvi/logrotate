@@ -65,6 +65,7 @@ struct logState {
     struct tm lastRotated;  /* only tm_hour, tm_mday, tm_mon, tm_year are good! */
     struct stat sb;
     int doRotate;
+    int noNewFile;
     int isUsed;     /* True if there is real log file in system for this state. */
     LIST_ENTRY(logState) list;
 };
@@ -1360,11 +1361,26 @@ static int findNeedRotating(const struct logInfo *log, unsigned logNum, int forc
     struct stat sb;
     struct logState *state;
     struct tm now;
+    struct stat logFileStats;
+    char *fileName = strdup(log->files[logNum]);
 
     message(MESS_DEBUG, "considering log %s\n", log->files[logNum]);
 
     localtime_r(&nowSecs, &now);
-
+    
+    if (stat(fileName, &logFileStats)) {
+        if (errno == ENOENT) {
+            message(MESS_DEBUG, "log %s does not exist\n",
+                    fileName);
+        } else {
+            message(MESS_ERROR, "cannot stat %s: %s\n", fileName,
+                    strerror(errno));
+        }
+        return 1;
+    }
+    
+    message(MESS_DEBUG, "log %s modified date is %s\n", fileName, ctime(&logFileStats.st_mtime));
+                        
     /* Check if parent directory of this log has safe permissions */
     if ((log->flags & LOG_FLAG_SU) == 0 && getuid() == ROOT_UID) {
         char *ld;
@@ -1416,6 +1432,7 @@ static int findNeedRotating(const struct logInfo *log, unsigned logNum, int forc
         return 1;
 
     state->doRotate = 0;
+    state->noNewFile = 0;
     state->sb = sb;
     state->isUsed = 1;
 
@@ -1447,6 +1464,11 @@ static int findNeedRotating(const struct logInfo *log, unsigned logNum, int forc
     }
     else if (log->maxsize && sb.st_size > log->maxsize) {
         state->doRotate = 1;
+    }
+    else if (log->rotateAge && (difftime(nowSecs, logFileStats.st_mtime) / DAY_SECONDS) > log->rotateAge) {
+         message(MESS_DEBUG, "  log needs rotating because older than maxage \n");
+         state->doRotate = 1;
+         state->noNewFile = 1;                             
     }
     else if (log->criterium == ROT_SIZE) {
         state->doRotate = (sb.st_size >= log->threshold);
@@ -2242,11 +2264,13 @@ static int rotateSingleLog(const struct logInfo *log, unsigned logNum,
 
         restoreSecCtx(&savedContext);
 
-        if (!hasErrors
+        if (!hasErrors && !(state->noNewFile)
                 && (log->flags & (LOG_FLAG_COPYTRUNCATE | LOG_FLAG_COPY))
                 && !(log->flags & LOG_FLAG_TMPFILENAME)) {
             hasErrors = copyTruncate(log->files[logNum], rotNames->finalName,
                                      &state->sb, log, !log->rotateCount);
+        } else {
+            unlink(log->files[logNum]);
         }
 
 #ifdef WITH_ACL
